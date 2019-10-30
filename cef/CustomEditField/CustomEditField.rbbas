@@ -438,7 +438,7 @@ Implements MessageReceiver
 		Sub Paint(g As Graphics, areas() As REALbasic.Rect)
 		  #pragma unused areas
 		  
-		  drawContents(g)
+		  drawContents(g, me.TrueWindow)
 		End Sub
 	#tag EndEvent
 
@@ -541,7 +541,7 @@ Implements MessageReceiver
 		    Return
 		  end if
 		  
-		  dim y as Integer
+		  dim y as Double
 		  XYAtCharPos(CaretPos, CaretLine, AutocompleteSuggestionInsertionX, y)
 		End Sub
 	#tag EndMethod
@@ -578,7 +578,7 @@ Implements MessageReceiver
 		  if ubound(CurrentAutocompleteOptions.Options) < 0 then Return
 		  
 		  //find XY pos of caret
-		  dim x,y, fx, fy as Integer
+		  dim x,y, fx, fy as Double
 		  XYAtCharPos(CaretPos, CaretLine, x,y)
 		  getFieldXY(fx, fy)
 		  x = x + fx
@@ -1190,11 +1190,22 @@ Implements MessageReceiver
 		  if SelLength = 0 then Return
 		  dim c as new Clipboard
 		  
+		  Dim textToCopy as String
+		  
 		  #if EditFieldGlobals.Replace00With01
-		    c.Text = me.SelText.ReplaceAll (Chr(1), Chr(0))
+		    textToCopy = me.SelText.ReplaceAll (Chr(1), Chr(0))
 		  #else
-		    c.Text = me.SelText
+		    textToCopy = me.SelText
 		  #endif
+		  
+		  #if TargetWin32
+		    // As the Text() and SelText() functions use CR for line delimiters, we need to convert them into the native format here)
+		    textToCopy = textToCopy.ReplaceAll (me.LineDelimiter, EndOfLine.Windows)
+		  #elseif TargetLinux
+		    textToCopy = textToCopy.ReplaceAll (me.LineDelimiter, EndOfLine.Unix)
+		  #endif
+		  
+		  c.Text = textToCopy
 		End Sub
 	#tag EndMethod
 
@@ -1214,7 +1225,7 @@ Implements MessageReceiver
 		  line = lines.getLine(openingLine)
 		  if line = nil then Return
 		  
-		  dim x, y1, y2 as Integer
+		  dim x, y1, y2 as Double
 		  XYAtCharPos(line.offset, openingLine, x, y1)
 		  
 		  dim closingLine as Integer = lines.nextBlockEndLine(openingLine)
@@ -1398,7 +1409,7 @@ Implements MessageReceiver
 	#tag EndMethod
 
 	#tag Method, Flags = &h21
-		Private Sub drawContents(gr as graphics)
+		Private Sub drawContents(gr as graphics, parentWindow as Window)
 		  #if not DebugBuild
 		    #pragma DisableBackgroundTasks
 		    
@@ -1462,7 +1473,11 @@ Implements MessageReceiver
 		      // but on Mac OS it's not needed any more.
 		      // In fact, it would prevent Retina / HiDPI rendering from working. Therefore, for
 		      // Mac builds, we now draw directly into the Canvas by not creating this back buffer
-		      mBackBuffer = new Picture(gr.Width, gr.Height, 32)
+		      #if RBVersion < 2017
+		        mBackBuffer = new Picture(gr.Width, gr.Height, 32)
+		      #else
+		        mBackBuffer = parentWindow.BitmapForCaching(gr.Width, gr.Height)
+		      #endif
 		    end if
 		    CalculateMaxHorizontalSB
 		    CalculateMaxVerticalSB
@@ -1511,7 +1526,13 @@ Implements MessageReceiver
 		    else
 		      // use separate graphics buffer for gutter
 		      if Gutter = nil or Gutter.Height <> g.Height or gutter.Width <> gutterWidth then
-		        Gutter = New Picture(gutterWidth, g.Height, 32)
+		        
+		        #if RBVersion < 2017
+		          Gutter = New Picture(gutterWidth, g.Height, 32)
+		        #else
+		          Gutter = parentWindow.BitmapForCaching(gutterWidth, g.Height)
+		        #endif
+		        
 		        gg = gutter.Graphics
 		        #if EditFieldGlobals.UseOldRenderer
 		          gg.UseOldRenderer = true
@@ -1608,7 +1629,7 @@ Implements MessageReceiver
 		        ranges.Append(MatchingBlockHighlight)
 		      end if
 		      
-		      dim x,y,w as Integer
+		      dim x,y,w as Double
 		      for each tmpSelection in ranges
 		        If tmpSelection.IsLineIndexInRange(lineIdx) then //if in selection, Highlight line
 		          
@@ -2033,7 +2054,7 @@ Implements MessageReceiver
 	#tag EndMethod
 
 	#tag Method, Flags = &h1
-		Protected Sub getFieldXY(byref locx as integer, byref locy as integer)
+		Protected Sub getFieldXY(byref locx as Double, byref locy as Double)
 		  //find the window where this control is...
 		  //since the control can be deeeeeeep whithin container controls...
 		  locx=me.Left
@@ -2177,6 +2198,7 @@ Implements MessageReceiver
 		  const HOME_KEY = 1
 		  const END_KEY = 4
 		  const ESC_KEY = 27
+		  const TAB_KEY = 9
 		  
 		  dim keyAsc as Integer = asc(key)
 		  
@@ -2263,7 +2285,7 @@ Implements MessageReceiver
 		    AutocompleteManual
 		    
 		    // ignore any control chars (includes Esc)
-		  elseif keyAsc <= 31 and keyAsc <> 13 then
+		  elseif keyAsc <= 31 and keyAsc <> 13  and  not (keyAsc = TAB_KEY and not KeepEntireTextIndented and not IndentVisually ) then
 		    ignoreRepaint = False
 		    Return False
 		    
@@ -2278,9 +2300,17 @@ Implements MessageReceiver
 		    if not typing or CurrentEventID = 0  or ticks > CurrentEventID + (60 * UNDO_EVT_BLOCK_SECS) then CurrentEventID = Ticks
 		    typing = true
 		    
-		    //if there's a selection, replace it
+		    //if there's a selection, we indent all selected lines unless if we are in keep indented mode then we replace
 		    if me.SelLength > 0 then
-		      private_replace(selStart , me.SelLength, key)
+		      if not me.KeepEntireTextIndented and keyAsc = TAB_KEY then
+		        
+		        Dim startLineNumber as Integer = me.LineNumAtCharPos(SelStart)
+		        Dim endLineNumber as Integer = me.LineNumAtCharPos(SelStart + SelLength)
+		        
+		        IndentLines(startLineNumber, endLineNumber,not Keyboard.ShiftKey)
+		      else
+		        private_replace(selStart , me.SelLength, key)
+		      end if
 		    else
 		      //see if we need to Autocomplete brackets
 		      dim bracketInserted as Boolean
@@ -2517,6 +2547,51 @@ Implements MessageReceiver
 		    break
 		    beep
 		  end
+		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Sub IndentLines(fromLine as Integer, toLine as integer, addIndent as Boolean)
+		  dim lock as new LinesLock(self) // prevents LineHighlighter from interfering while we're modifying the lines
+		  #pragma unused lock
+		  
+		  #if DebugBuild and (EditFieldGlobals.DebugTiming or EditFieldGlobals.DebugIndentation)
+		    dim runtimer as new Debugging.LifeTimer("ReindentText "+str(fromLine)+" to "+str(toLine))
+		  #endif
+		  
+		  if CurrentEventID <= 0 then
+		    // ensure that this entire process becomes a single undoable action
+		    CurrentEventID = Ticks
+		  end if
+		  
+		  dim needsRedraw as Boolean
+		  
+		  self.IgnoreRepaint = true
+		  dim state as Variant
+		  for i as Integer = fromLine to toLine
+		    dim line as TextLine = lines.getLine (i)
+		    
+		    if line = nil then
+		      Continue
+		    end
+		    
+		    if addIndent then
+		      private_replace (line.offset, 0, Chr(9), false, CurrentEventID, true, true)
+		    else
+		      if TextStorage.getText(line.offset, 1) = Chr(9) then
+		        private_replace (line.offset, 1, "", false, CurrentEventID, true, true)
+		      end if
+		    end if
+		    line.IsDirty = true
+		    
+		    needsRedraw = true
+		  next
+		  self.IgnoreRepaint = False
+		  
+		  if needsRedraw then
+		    Highlight
+		  end
+		  
 		End Sub
 	#tag EndMethod
 
@@ -3370,7 +3445,7 @@ Implements MessageReceiver
 		  caretState = not caretState
 		  if caretState then Return
 		  
-		  dim xpos, ypos as Integer
+		  dim xpos, ypos as Double
 		  
 		  if atPos = CaretPos then
 		    XYAtCharPos(atPos, CaretLine, xpos, ypos)
@@ -3760,7 +3835,7 @@ Implements MessageReceiver
 		    #pragma unused height
 		    
 		    // Draw directly, without the Paint event
-		    drawContents(Graphics)
+		    drawContents (Graphics, self.TrueWindow)
 		  #endif
 		  
 		End Sub
@@ -4377,6 +4452,8 @@ Implements MessageReceiver
 
 	#tag Method, Flags = &h0
 		Function Text(offset as Integer, length as Integer) As String
+		  // Attention: Returned line delimiters will be CR, i.e. chr(13), by default and not CR+LF or LF, even on Windows and Linux!
+		  
 		  if offset >= 0 and length > 0 then
 		    Return TextStorage.getText(offset, length)
 		  end if
@@ -4387,11 +4464,20 @@ Implements MessageReceiver
 		Protected Function tmpPicture() As picture
 		  //return a temporary picture.
 		  if sharedTmpPicture = nil then
-		    sharedTmpPicture = New Picture(2,2,32)
+		    
+		    #if RBVersion < 2013
+		      sharedTmpPicture = New Picture(2,2,32)
+		    #else
+		      // We avoid horrible letter width calculation errors on Windows by creating
+		      // the new style of Picture Object
+		      sharedTmpPicture = New Picture(2,2)
+		    #endif
+		    
 		    #if EditFieldGlobals.UseOldRenderer
 		      sharedTmpPicture.Graphics.UseOldRenderer = true
 		    #endif
 		  end if
+		  
 		  
 		  sharedTmpPicture.Graphics.TextFont = TextFont
 		  sharedTmpPicture.Graphics.TextSize = TextSize
@@ -4512,14 +4598,17 @@ Implements MessageReceiver
 		  vertical = self.ScrollPosition
 		  
 		  //vertical check
-		  if charLine < ScrollPosition then
+		  if charLine < vertical then
 		    vertical = charLine
-		  elseif charLine > ScrollPosition + VisibleLineRange.length - 2 then
-		    vertical = charLine - VisibleLineRange.length + 2
+		  else
+		    dim visibleLines as Integer = self.visibleAndHiddenLines - 1
+		    if visibleLines > 0 and (charLine - visibleLines > vertical) then
+		      vertical = charLine - visibleLines
+		    end if
 		  end if
 		  
 		  //horizontal check
-		  dim x, y as Integer
+		  dim x, y as Double
 		  XYAtCharPos(charPos, charLine, x, y)
 		  
 		  if x< LineNumOffset or  x >= self.Width then
@@ -4528,6 +4617,19 @@ Implements MessageReceiver
 		  
 		  changeScrollValues(horizontal, vertical)
 		End Sub
+	#tag EndMethod
+
+	#tag Method, Flags = &h21
+		Private Function visibleAndHiddenLines() As Integer
+		  // Includes the lines hidden by folding
+		  
+		  if EnableLineFoldings then
+		    return lines.invisibleLines + MaxVisibleLines
+		  else
+		    return MaxVisibleLines
+		  end if
+		  
+		End Function
 	#tag EndMethod
 
 	#tag Method, Flags = &h1
@@ -4548,7 +4650,7 @@ Implements MessageReceiver
 	#tag EndMethod
 
 	#tag Method, Flags = &h0
-		Sub XYAtCharPos(charPos as integer, byref X as integer, byref Y as integer)
+		Sub XYAtCharPos(charPos as integer, byref X as Double, byref Y as Double)
 		  dim lineNumber as Integer
 		  lineNumber = lines.getLineNumberForOffset(charPos)
 		  XYAtCharPos(CharPos, LineNumber, x, y)
@@ -4556,7 +4658,7 @@ Implements MessageReceiver
 	#tag EndMethod
 
 	#tag Method, Flags = &h1
-		Protected Sub XYAtCharPos(charPos as integer, lineNumber as integer, byref X as integer, byref Y as integer)
+		Protected Sub XYAtCharPos(charPos as integer, lineNumber as integer, byref X as Double, byref Y as Double)
 		  //find the screenx and screeny for the given CharPos
 		  
 		  //y
@@ -4853,7 +4955,7 @@ Implements MessageReceiver
 	#tag EndProperty
 
 	#tag Property, Flags = &h1
-		Protected AutocompleteSuggestionInsertionX As Integer
+		Protected AutocompleteSuggestionInsertionX As Double
 	#tag EndProperty
 
 	#tag Property, Flags = &h0
@@ -4877,11 +4979,11 @@ Implements MessageReceiver
 	#tag EndComputedProperty
 
 	#tag Property, Flags = &h1
-		Protected blockBeginPosX As Integer
+		Protected blockBeginPosX As Double
 	#tag EndProperty
 
 	#tag Property, Flags = &h1
-		Protected blockBeginPosY As Integer
+		Protected blockBeginPosY As Double
 	#tag EndProperty
 
 	#tag Property, Flags = &h21
@@ -5011,7 +5113,7 @@ Implements MessageReceiver
 	#tag ComputedProperty, Flags = &h1
 		#tag Getter
 			Get
-			  dim x, y as Integer
+			  dim x, y as Double
 			  dim calcPos as Integer = desiredColumnCharPos
 			  
 			  //or the caretpos
@@ -5577,7 +5679,7 @@ Implements MessageReceiver
 			Careful:
 			This returns just the number of rows that fit into the Canvas.
 			This is not the same as the number of text lines that may be appearing in
-			the Canvas if line folding is used! (That value is in VisibleLineRange.length)
+			the Canvas if line folding is used! (Get that value from self.visibleAndHiddenLines)
 		#tag EndNote
 		#tag Getter
 			Get
@@ -5988,6 +6090,8 @@ Implements MessageReceiver
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
+			  // Attention: Returned line delimiters will be CR, i.e. chr(13), by default and not CR+LF or LF, even on Windows and Linux!
+			  
 			  Return TextStorage.getText(selStart, selLength)
 			End Get
 		#tag EndGetter
@@ -6062,6 +6166,8 @@ Implements MessageReceiver
 	#tag ComputedProperty, Flags = &h0
 		#tag Getter
 			Get
+			  // Attention: Returned line delimiters will be CR, i.e. chr(13), by default and not CR+LF or LF, even on Windows and Linux!
+			  
 			  Return textStorage.getText(0, textStorage.Length)
 			End Get
 		#tag EndGetter
@@ -6171,7 +6277,7 @@ Implements MessageReceiver
 			  mTextHeight = value
 			End Set
 		#tag EndSetter
-		TextHeight As Integer
+		TextHeight As Double
 	#tag EndComputedProperty
 
 	#tag ComputedProperty, Flags = &h0
@@ -6518,7 +6624,9 @@ Implements MessageReceiver
 		#tag EndViewProperty
 		#tag ViewProperty
 			Name="DoubleBuffer"
+			Visible=true
 			Group="Behavior"
+			InitialValue="False"
 			Type="Boolean"
 			InheritedFrom="Canvas"
 		#tag EndViewProperty
@@ -6648,7 +6756,6 @@ Implements MessageReceiver
 		#tag EndViewProperty
 		#tag ViewProperty
 			Name="InitialParent"
-			Group="Initial State"
 			InheritedFrom="Canvas"
 		#tag EndViewProperty
 		#tag ViewProperty
@@ -6846,7 +6953,7 @@ Implements MessageReceiver
 			Name="TextHeight"
 			Group="Behavior"
 			InitialValue="0"
-			Type="Integer"
+			Type="Double"
 		#tag EndViewProperty
 		#tag ViewProperty
 			Name="TextLength"
